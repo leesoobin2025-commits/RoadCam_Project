@@ -12,19 +12,24 @@ G = (0, 255, 0)     # vạch trái (BGR)
 R = (0, 0, 255)       # vạch phải (BGR)
 BLUE = (255, 128, 0)
 
-def sobel(gray_img):
-    gx=cv2.Sobel(gray_img,cv2.CV_64F,1,0)
-    gy=cv2.Sobel(gray_img,cv2.CV_64F,0,1)
-    dolon=np.sqrt(gx**2+gy**2)
-    dolon=np.split(dolon,0,255)
+def sobel(img):
+    gray_img=to_gray(img)
+    gx = cv2.Sobel(gray_img,cv2.CV_64F,1,0)
+    gy = cv2.Sobel(gray_img,cv2.CV_64F,0,1)
+    
+    dolon = np.sqrt(gx**2+gy**2)
+    dolon = cv2.normalize(dolon, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+    
     return dolon.astype(np.uint8)
 
-def canny(gray_img,low,high):
+def canny(img, low,high):
+    gray_img=to_gray(img)
     low,high= int(low), int(high)
     return cv2.Canny(gray_img,low,high)
 
-def hough_lines(edge_img,threshold,min_len,max_gap):
-    line=cv2.HoughLinesP(edge_img,1,np.pi/180,int(threshold),min_len,max_gap)
+def hough_lines(edge_img, threshold, min_len,max_gap):
+    line=cv2.HoughLinesP(edge_img, 1, np.pi/180, int(threshold), min_len, max_gap)
+    
     if line is None:
         return []
     else:
@@ -32,6 +37,7 @@ def hough_lines(edge_img,threshold,min_len,max_gap):
 
 def classify_line(line, slope_thresh=0.5):
     left,right=[],[]
+    
     for x1,y1,x2,y2 in line:
         if x2==x1:
             continue
@@ -40,23 +46,27 @@ def classify_line(line, slope_thresh=0.5):
             left.append((x1,y1,x2,y2))
         elif m>slope_thresh:
             right.append((x1,y1,x2,y2))
+    
     return left,right
 
-def draw_lane(img,left,right,thickness=3):
+def draw_lane(img, left, right, thickness=3):
      # Nếu ảnh xám thì chuyển sang BGR
     if img.ndim == 2:
         out = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     # Nếu ảnh màu thì giữ nguyên ảnh gốc
     else:
         out = img.copy()
+        
     for x1,y1,x2,y2 in left:
         cv2.line(out,(int(x1),int(y1)),(int(x2),int(y2)),G,thickness)
+        
     for x1,y1,x2,y2 in right:
         cv2.line(out,(int(x1),int(y1)),(int(x2),int(y2)),R,thickness)
+        
     return out
 
 #pipeline
-def apply_roi(edges,roi_points):
+def apply_roi(edges, roi_points):
     if roi_points is None or len(roi_points) < 3:
         raise ValueError("ROI phải có ít nhất 3 điểm")
 
@@ -75,6 +85,19 @@ def hough_all(img,threshold,min_len,max_gap,canny_low,canny_high,roi):
     return draw_lane(img,hough_lines(edges,threshold,min_len,max_gap))
 
 def lane_split(img,roi,threshold,min_len,max_gap,canny_low,canny_high):
+    
+    return cv2.bitwise_and(edges, mask)
+
+def edges_in_roi(img, canny_low, canny_high, roi=None, blur_ksize=5, blur_sigma=1.5):
+    blur=gaussian_filter(img, blur_ksize, blur_sigma)
+    return apply_roi(canny(blur, canny_low, canny_high), roi)
+
+def hough_all(img, threshold, min_len, max_gap, canny_low, canny_high,roi):
+    # Vẽ mọi đoạn tìm được
+    edges=edges_in_roi(img, canny_low, canny_high, roi)
+    return draw_lane(img, hough_lines(edges,threshold,min_len,max_gap))
+
+def lane_split(img,roi, threshold, min_len, max_gap, canny_low, canny_high):
     return detect_lane(
         img,
         roi=roi,
@@ -90,6 +113,7 @@ def detect_lane(img,roi,canny_low,canny_high,threshold,min_len,max_gap):
     return draw_lane(img,left,right)
 
 if __name__ == "__main__":
+    pass
     import glob
     roi = np.array([
     (0, 719),       # Góc dưới trái
