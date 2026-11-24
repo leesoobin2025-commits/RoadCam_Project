@@ -69,7 +69,7 @@ def denoising(image, method, ksize=3, q=1.5):
 def mse_psnr(image_origin, image_filter):
     mse = np.mean((image_origin.astype(np.float64) - image_filter.astype(np.float64)) ** 2)
     if mse == 0:
-        return float("inf")
+        return 0.0, float("inf")
     psnr = 10 * np.log10(255**2 / mse)
     return mse, psnr
 if __name__ == "__main__":

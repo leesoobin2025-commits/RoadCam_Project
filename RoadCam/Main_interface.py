@@ -239,11 +239,11 @@ def _fixed_seed(func, seed=12345):
 
 
 def cmd_gaussian_noise(image, sigma):
-    return _fixed_seed(lambda: app_gaussian_noise(image, mean=0, sigma=float(sigma)))
+    return _fixed_seed(lambda: add_gaussian_noise(image, mean=0, sigma=float(sigma)))
 
 
 def cmd_salt_pepper_noise(image, p):
-    return _fixed_seed(lambda: app_salt_pepper_noise(image, p=float(p)))
+    return _fixed_seed(lambda: add_salt_pepper_noise(image, p=float(p)))
 
 
 def cmd_denoise(image, method, ksize, q):
