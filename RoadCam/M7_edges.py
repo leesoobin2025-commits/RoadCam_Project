@@ -76,7 +76,8 @@ def apply_roi(edges, roi_points):
 
 def edges_in_roi(img, canny_low, canny_high, roi=None, blur_ksize=5, blur_sigma=1.5):
     blur=gaussian_filter(img, blur_ksize, blur_sigma)
-    return apply_roi(canny(blur, canny_low, canny_high), roi)
+    edges = canny(blur, canny_low, canny_high)
+    return apply_roi(edges, roi) if roi is not None else edges
 
 def hough_all(img, threshold, min_len, max_gap, canny_low, canny_high,roi):
     # Vẽ mọi đoạn tìm được

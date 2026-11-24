@@ -49,6 +49,8 @@ def contrast_stretching(img, a, b):
     """
     
     # Check giá trị a - b nên để ở đâu
+    if b <= a:
+        raise ValueError()
     img_contr = img.astype(float)
     img_contr = ((img_contr - a) * 255) / (b - a)
     
