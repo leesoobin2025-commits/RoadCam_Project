@@ -28,10 +28,12 @@ from matplotlib.figure import Figure
 from M2_adjustment import *
 from M3_filters import *
 from M4_noise import *
-from M5_color import hsv_channels, range_mask, lane_mask
-from M6_morphology import binarize, erode, dilate, opening, closing, remove_small_regions
-from M7_edges import sobel, canny, detect_lane, hough_all
+from M5_color import *
+from M6_morphology import *
+from M7_edges import *
 from M8_video import *
+from model_YOLO import detect_vehicles_and_people
+
 OPERATION_ERRORS = (
     cv2.error,
     TypeError,
@@ -223,7 +225,7 @@ def cmd_levels(image, value):
 
 
 def cmd_invert(image):
-    return 255 - image
+    return negative_img(image)
 
 
 def _fixed_seed(func, seed=12345):
@@ -237,11 +239,11 @@ def _fixed_seed(func, seed=12345):
 
 
 def cmd_gaussian_noise(image, sigma):
-    return _fixed_seed(lambda: app_gaussian_noise(image, mean=0, sigma=float(sigma)))
+    return _fixed_seed(lambda: add_gaussian_noise(image, mean=0, sigma=float(sigma)))
 
 
 def cmd_salt_pepper_noise(image, p):
-    return _fixed_seed(lambda: app_salt_pepper_noise(image, p=float(p)))
+    return _fixed_seed(lambda: add_salt_pepper_noise(image, p=float(p)))
 
 
 def cmd_denoise(image, method, ksize, q):
@@ -266,7 +268,6 @@ def _need_color(image):
 def _mask_or_image(image, mask, view):
     """view='mask' -> mặt nạ trắng/đen; còn lại -> ảnh chỉ giữ vùng được chọn."""
     return mask if view == "mask" else cv2.bitwise_and(image, image, mask=mask)
-
 
 # ---- M5: Màu ----
 def cmd_hsv_range(image, hmin, hmax, smin, smax, vmin, vmax, view):
@@ -317,13 +318,6 @@ def cmd_detect_lane(image, canny_low, canny_high, threshold, min_len, max_gap, r
     return detect_lane(image, roi=roi_points, canny_low=canny_low, canny_high=canny_high,
                        threshold=threshold, min_len=min_len, max_gap=max_gap)
 
-
-def mse_psnr(a, b):
-    """MSE và PSNR (dB) giữa 2 ảnh uint8 cùng kích thước — nguồn duy nhất cho mọi nơi cần PSNR."""
-    mse = float(np.mean((a.astype(np.float64) - b.astype(np.float64)) ** 2))
-    return mse, (float("inf") if mse == 0 else 10 * np.log10(255 ** 2 / mse))
-
-
 def similarity_metrics(a, b):
     """Độ giống nhau giữa 2 ảnh uint8 cùng kích thước."""
     mse, psnr = mse_psnr(a, b)
@@ -356,12 +350,13 @@ def command(name, func, *params, lib=False, **extra):
 equalize_cv2 = _img(hist_balance_openCV)   # dùng cho nút "So sánh với OpenCV"
 
 KSIZE_ITEMS = [(f"{k} × {k}", k) for k in (3, 5, 7, 9)]
+
 MORPH_SHAPES = [("Hình chữ nhật", cv2.MORPH_RECT),
                 ("Hình elip", cv2.MORPH_ELLIPSE),
                 ("Hình chữ thập", cv2.MORPH_CROSS)]
+
 ITERATION_ITEMS = [(str(i), i) for i in (1, 2, 3, 4, 5)]
-DENOISE_METHODS = [("Trung bình hình học", "geometric"),
-                   ("Phản điều hòa ", "contraharmonic")]
+DENOISE_METHODS = [("Phản điều hòa ", "contraharmonic")]#("Trung bình hình học", "geometric"), thêm sau
 
 
 def ksize_param(default=5, label="Kích thước nhân"):
@@ -981,6 +976,7 @@ class ImageStudio(VideoModuleM8, QMainWindow):
 
         # Video
         self.init_video_state()
+        self.ai_yolo_active = False
 
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
@@ -1041,7 +1037,9 @@ class ImageStudio(VideoModuleM8, QMainWindow):
             QPushButton#primary, QFrame#card QPushButton#primary {{ background: {ACCENT}; color: white; border-color: {ACCENT}; font-weight: 600; }}
             QPushButton:disabled, QToolButton:disabled {{ color: {MUTED}; }}
             QComboBox, QSpinBox, QDoubleSpinBox {{ background: {PANEL_2}; border: 1px solid {BORDER}; border-radius: 6px; padding: 5px 7px; min-height: 20px; }}
-            QComboBox QAbstractItemView {{ selection-background-color: {selected}; selection-color: {TEXT}; }}
+            QFrame#card QComboBox, QFrame#card QSpinBox, QFrame#card QDoubleSpinBox {{ background: {PANEL_2}; color: {TEXT}; }}
+            QFrame#card QComboBox QAbstractItemView, QComboBox QAbstractItemView {{ background: {PANEL}; color: {TEXT}; border: 1px solid {BORDER}; selection-background-color: {selected}; selection-color: {TEXT}; }}
+            QComboBox QAbstractItemView::item:hover, QComboBox QAbstractItemView::item:selected {{ background: {selected}; color: {TEXT}; }}
             QTabWidget::pane {{ border: none; padding-top: 7px; }}
             QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 7px 7px; border-bottom: 2px solid transparent; }}
             QTabBar::tab:selected {{ color: {ACCENT}; border-bottom-color: {ACCENT}; font-weight: 600; }}
@@ -1132,8 +1130,10 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         self.create_video_menu(bar)
 
         m = bar.addMenu("AI")
-        a = self.add_action(m, "(Sẽ bổ sung)", lambda: None)
-        a.setEnabled(False)
+        self.yolo_action = self.add_action(m, "Phát hiện phương tiện (YOLO)", self.run_yolo_detection)
+        self.yolo_action.setCheckable(True)
+        m.addSeparator()
+        self.add_action(m, "Xuất video phát hiện phương tiện (YOLO)...", self.export_yolo_video)
 
         m = bar.addMenu("Trợ giúp")
         self.add_action(m, "Phím tắt", lambda: QMessageBox.information(
@@ -1223,7 +1223,7 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         tools.setObjectName("tools")
         tools.setMovable(False)
         tools.setOrientation(Qt.Orientation.Vertical)
-        tools.setFixedWidth(154)
+        tools.setFixedWidth(56)
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, tools)
 
         tool_content = QWidget()
@@ -1235,18 +1235,19 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         tool_scroll.setWidgetResizable(True)
         tool_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         tool_scroll.setWidget(tool_content)
-        tool_scroll.setFixedWidth(144)
+        tool_scroll.setFixedWidth(46)
         tools.addWidget(tool_scroll)
 
         def section(text):
-            lbl = QLabel(text)
-            lbl.setObjectName("toolSection")
-            tool_layout.addWidget(lbl)
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setStyleSheet(f"color: {P['BORDER']}; margin: 4px 6px;")
+            tool_layout.addWidget(line)
 
         SP = QStyle.StandardPixmap
 
         def tool_button(icon, text, tip=None, slot=None, checkable=False):
-            b = QPushButton(text)
+            b = QPushButton()
             b.setObjectName("tool")
             b.setFixedHeight(34)
             b.setIcon(self.style().standardIcon(icon))
@@ -1258,9 +1259,6 @@ class ImageStudio(VideoModuleM8, QMainWindow):
             tool_layout.addWidget(b)
             return b
 
-        title = QLabel("HỘP CÔNG CỤ")
-        title.setObjectName("toolTitle")
-        tool_layout.addWidget(title)
 
         section("CHỌN & ĐO")
         group = QButtonGroup(self)
@@ -1646,6 +1644,14 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         self.param_tabs.setCurrentIndex(index)
 
     def open_command(self, group, key):
+        if (group, key) in (("Điều chỉnh", "balance histogram"), ("Điều chỉnh", "clahe")):
+            if self.current_image is not None and self.current_image.ndim != 2:
+                QMessageBox.information(
+                    self,
+                    GROUPS[group][key]["name"],
+                    "Chức năng này chỉ dùng cho ảnh xám.\nHãy chuyển ảnh sang ảnh xám trước."
+                )
+                return
         if self.canvas.interaction_mode == "roi_poly":      # <-- thêm
             self.tool_actions["none"].setChecked(True)
             self.set_tool("none")
@@ -1663,6 +1669,8 @@ class ImageStudio(VideoModuleM8, QMainWindow):
             self.operation_stacks[self.active_group].setCurrentIndex(0)
         self.active_command = None
         self.active_group = None
+        if self.is_video_open:
+            self.refresh_video_frame()
 
     def set_comparison_visible(self, visible):
         self.compare_card.setVisible(visible)
@@ -1918,12 +1926,6 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         except Exception as error:
             QMessageBox.critical(self, "Lỗi lưu ảnh", str(error))
             return False
-
-    # -----------------------------------------------------
-    # VIDEO
-    # -----------------------------------------------------
-
-    
     # -----------------------------------------------------
     # ZOOM
     # -----------------------------------------------------
@@ -2256,6 +2258,13 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         self.command_info = {}
         if isinstance(out, tuple):
             out, self.command_info = out
+        if not need:
+            mask = self.get_roi_mask(image)
+            if mask is not None and out.shape[:2] == image.shape[:2]:
+                if out.ndim == 2 and image.ndim == 3:
+                    out = cv2.cvtColor(out, cv2.COLOR_GRAY2BGR)
+                cond = mask > 0 if out.ndim == 2 else mask[..., None] > 0
+                out = np.where(cond, out, image)
         return out
 
     def show_hsv_channels(self):
@@ -2295,10 +2304,15 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         return {key: widget.value() for key, widget in widgets.items()}
 
     def schedule_preview(self, *_):
-        if self.current_image is not None and not self.is_video_open:
+        if self.current_image is None:
+            return
+        if not self.is_video_open or not self.video_timer.isActive():
             self.preview_timer.start()
 
     def update_preview(self):
+        if self.is_video_open:
+            self.refresh_video_frame()
+            return
         key = self.active_command
         config = self.current_operation_config()
         if (key is None or config is None or self.current_image is None
@@ -2555,6 +2569,37 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         if self.video_capture is not None:
             self.video_capture.release()
         event.accept()
+        
+    #MODEL YOLO
+    def run_yolo_detection(self, checked=False):
+     if self.current_image is None:
+         self.yolo_action.setChecked(False)
+         QMessageBox.information(self, "Thông báo", "Hãy mở ảnh hoặc video trước.")
+         return
+
+     # Nếu đang mở video: bật/tắt overlay "yolo" của M8
+     if self.is_video_open:
+         self.set_video_overlay("yolo" if checked else "none")
+         return
+
+     # Nếu là ảnh tĩnh: chạy 1 lần, lưu vào Lịch sử và cập nhật Bảng kết quả
+     self.yolo_action.setChecked(False)
+     if not self.can_edit():
+         return
+     try:
+         self.status_message.setText("Đang chạy mô hình YOLOv8n...")
+         QApplication.processEvents()
+         result, info = detect_vehicles_and_people(self.current_image)
+     except Exception as error:
+         QMessageBox.warning(self, "YOLO", f"Lỗi chạy mô hình: {error}")
+         return
+
+     self.push_state("AI: Phát hiện phương tiện (YOLO)", result)
+     self.command_info = info
+     self.update_results()
+     self.status_message.setText(
+         f"YOLO: {info['Số xe']} xe, {info['Số người']} người"
+     )
         
 def excepthook(exc_type, exc, tb):
     traceback.print_exception(exc_type, exc, tb)
