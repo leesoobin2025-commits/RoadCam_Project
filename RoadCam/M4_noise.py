@@ -1,5 +1,4 @@
 from Libary import *
-from M3_filters import *
 # TODO:
 """ 
     1. Thêm nhiễu vào ảnh
@@ -37,20 +36,24 @@ def add_salt_pepper_noise(img, p, salt_vs_pepper = 0.5):
     return noisy_img
     
 def denoising_phan_dieu_hoa(image, m, n, Q):
-    g = image.astype(np.float64) + 1
+    g = image.astype(np.float64) + 1.0
     ry, rx = m // 2, n // 2
     pad = [(ry, ry), (rx, rx)] + [(0, 0)] * (g.ndim - 2)
     p = np.pad(g, pad, mode="reflect")
     h, w = g.shape[:2]
-    out = np.zeros_like(g)
-
-    for y in range(h):
-        for x in range(w):
-            win = p[y:y + m, x:x + n]          # cửa sổ quanh (x, y)
-            num = np.sum(win ** (Q + 1), axis=(0, 1))  # Σ g^(Q+1)
-            den = np.sum(win ** Q, axis=(0, 1))        # Σ g^Q
-            out[y, x] = num / den - 1
     
+    p_Q = p ** Q
+    p_Q1 = p_Q * p  # nhanh hơn p ** (Q + 1)
+
+    # 2. Cộng dồn vector hóa theo cửa sổ (chỉ lặp m * n lần)
+    num = np.zeros_like(g)
+    den = np.zeros_like(g)
+    for dy in range(m):
+        for dx in range(n):
+            num += p_Q1[dy:dy + h, dx:dx + w]
+            den += p_Q[dy:dy + h, dx:dx + w]
+
+    out = num / den - 1.0
     return np.clip(out, 0, 255).astype(np.uint8)
         
 def denoising(image, method, ksize=3, q=1.5):
@@ -61,7 +64,6 @@ def denoising(image, method, ksize=3, q=1.5):
 
     if method == "contraharmonic":
         return denoising_phan_dieu_hoa(image, ksize, ksize, q)
-
     else:
         raise ValueError(f"Phương pháp giảm nhiễu không hợp lệ: {method}")
 
@@ -72,5 +74,6 @@ def mse_psnr(image_origin, image_filter):
         return 0.0, float("inf")
     psnr = 10 * np.log10(255**2 / mse)
     return mse, psnr
+
 if __name__ == "__main__":
     pass

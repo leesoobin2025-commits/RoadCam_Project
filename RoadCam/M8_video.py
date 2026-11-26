@@ -58,7 +58,8 @@ class VideoModuleM8:
         self.flow_trail = None           # accumulated motion trails
         self.diff_threshold = 25         # threshold used by the change detector
         self._lane_sliders_hooked = False
-
+        self.video_committed_op = None
+        
     def create_video_menu(self, bar):
         """Build the "Video" menu on the given menu bar."""
         m = bar.addMenu("Video")
@@ -185,24 +186,32 @@ class VideoModuleM8:
         self.video_timer.stop()
         was_open = self.is_video_open
         self.is_video_open = False
+        self.video_committed_op = None
+        
         if self.video_capture is not None:
             self.video_capture.release()
             self.video_capture = None
         self.video_prev_gray = None
         self.flow_points = None
         self.flow_trail = None
+        
         if hasattr(self, "video_bar"):
             self.video_bar.setVisible(False)
             self.video_play_button.setText("▶")
+            
         if was_open and not silent and self.current_image is not None:
             self.image_path = ""
             self.video_overlay = "none"
+            self.video_committed_op = None
+            
             for act in getattr(self, "overlay_actions", {}).values():
                 act.setChecked(False)
+                
             if hasattr(self, "yolo_action"):
               self.yolo_action.setChecked(False)
             self.original_image = self.current_image.copy()
             self.reset_history(f"Khung hình {self.video_frame_number}", self.current_image)
+            
             if hasattr(self, "after_image_changed"):
                 self.after_image_changed()
             self.status_message.setText("Đã dừng video — có thể chỉnh sửa khung hình hiện tại")
@@ -321,6 +330,8 @@ class VideoModuleM8:
     def set_video_overlay(self, mode):
         """Switch the live overlay: lane detection, change detection or tracking."""
         self.video_overlay = mode
+        if mode == "none":
+            self.video_committed_op = None
         for key, act in self.overlay_actions.items():
             act.setChecked(key == mode)
         if hasattr(self, "yolo_action"):
@@ -350,13 +361,22 @@ class VideoModuleM8:
             return self.flow_frame(frame)
         if self.video_overlay == "yolo":
             return self.yolo_frame(frame)
+        out = frame.copy()
+
+        if getattr(self, "video_committed_op", None) is not None:
+            committed_cfg, committed_params = self.video_committed_op
+            try:
+                out = self.run_command(committed_cfg, out, committed_params)
+            except (cv2.error, ValueError, TypeError, ZeroDivisionError) as error:
+                self.status_message.setText(f"Lỗi hiệu ứng video: {error}")
+        
         config = getattr(self, "current_operation_config", lambda: None)()
         if config is not None and getattr(self, "preview_button", None) and self.preview_button.isChecked():
             try:
-                return self.run_command(config, frame, self.current_params())
+                return self.run_command(config, out, self.current_params())
             except (cv2.error, ValueError, TypeError, ZeroDivisionError) as error:
                 self.status_message.setText(f"Không áp dụng được lên video: {error}")
-        return frame.copy()
+        return out
 
     # ----- lane detection: M7 function + ROI and parameters of the main window -----
 
@@ -379,7 +399,8 @@ class VideoModuleM8:
     def yolo_frame(self, frame):
         """Chạy YOLO trên từng khung hình video và cập nhật Bảng kết quả."""
         try:
-            out, info = detect_vehicles_and_people(frame)
+            roi = self.get_yolo_roi(frame) if hasattr(self, "get_yolo_roi") else None
+            out, info = detect_vehicles_and_people(frame, roi_points=roi)
             self.command_info = info
             return out
         except Exception as error:
@@ -403,10 +424,10 @@ class VideoModuleM8:
         """M7 `detect_lane` on one frame -> BGR frame with the left (green) / right (red) lanes."""
         bgr = frame if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         result = detect_lane(bgr, roi=roi, **params)
-        if isinstance(result, tuple):        # tolerate a version of M7 that also returns info
+        if isinstance(result, tuple):
             result = result[0]
         out = result.copy()
-        if draw_roi:
+        if draw_roi and roi is not None:
             cv2.polylines(out, [np.array(roi, np.int32).reshape(-1, 1, 2)], True, (255, 200, 0), 1)
         return out
 
@@ -414,12 +435,6 @@ class VideoModuleM8:
         """Lane overlay for the frame on screen (needs a valid ROI, like the Edge menu)."""
         roi = self.lane_roi(frame)
         out = frame.copy()
-        if roi is None:
-            cv2.putText(out, "Chua co ROI hop le", (12, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            self.status_message.setText(
-                "Chưa có ROI hợp lệ cho video: chọn 'ROI hình thang' và click 4 đỉnh, hoặc Nạp ROI")
-            return out
         try:
             return self.draw_lanes(frame, roi, self.lane_command_params(), draw_roi=True)
         except LANE_ERRORS as error:
@@ -623,12 +638,6 @@ class VideoModuleM8:
         """Run lane detection on every frame and write the result with VideoWriter."""
         def prepare(width, height):
             roi = self.lane_roi(np.empty((height, width), np.uint8))
-            if roi is None:
-                QMessageBox.warning(
-                    self, "Xuất video",
-                    f"Chưa có ROI hợp lệ cho video {width}×{height}.\n"
-                    "Hãy vẽ ROI hình thang (4 đỉnh) hoặc Nạp ROI (.json) rồi xuất lại.")
-                return None
             params = self.lane_command_params()
             return lambda frame: self.draw_lanes(frame, roi, params)
 
@@ -640,8 +649,13 @@ class VideoModuleM8:
 
     def export_yolo_video(self):
         """Chạy YOLO phát hiện xe và người trên toàn bộ khung hình và xuất video."""
+        def prepare(width, height):
+            dummy = np.empty((height, width), np.uint8)
+            roi = self.get_yolo_roi(dummy) if hasattr(self, "get_yolo_roi") else None
+            return lambda frame: detect_vehicles_and_people(frame, roi_points=roi)[0]
+        
         self._export_video(
             "Lưu video phát hiện phương tiện (YOLO)", "_yolo",
             "Đang phát hiện phương tiện (YOLO) trên từng khung hình...",
-            frame_fn=lambda frame: detect_vehicles_and_people(frame)[0]
+            prepare_fn=prepare
         )
