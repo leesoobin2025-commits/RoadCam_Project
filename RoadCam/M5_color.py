@@ -1,9 +1,12 @@
 # TODO:
+<<<<<<< HEAD
 """
     1. Chọn vùng ảnh theo màu
     3. Điều chỉnh tham số chọn màu
     4. Hiển thị kết quả xử lý
 """
+=======
+>>>>>>> origin/main
 import cv2,os,glob
 import numpy as np
 

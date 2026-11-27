@@ -87,8 +87,12 @@ def color_filtered_edges(img, canny_low, canny_high, roi=None,
 def edges_in_roi(img, canny_low, canny_high, roi=None, blur_ksize=5, blur_sigma=1.5):
     gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blur = gaussian_filter(gray, blur_ksize, blur_sigma)
+<<<<<<< HEAD
     edges = canny(blur, canny_low, canny_high)
     return apply_roi(edges, roi) if roi is not None else edges
+=======
+    return apply_roi(canny(blur, canny_low, canny_high), roi)
+>>>>>>> origin/main
 
 def hough_all(img, threshold, min_len, max_gap, canny_low, canny_high, roi=None):
     edges = edges_in_roi(img, canny_low, canny_high, roi=roi)
