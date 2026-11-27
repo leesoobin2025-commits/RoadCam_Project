@@ -16,3 +16,26 @@ Phần cần sửa và lưu ý
 #Đã xem video được nhưng vẫn bị lỗi không chỉnh ROI áp ROI và điều khiển M7 M5
 #phát hiện làn trên video, phát hiện chuyển động\
 #Tóm lại phần M8 chưa liên kết được với M7 và M5
+
+#Phân ROI trong đoạn run_command có 1 đoạn để ROI mà vẫn hiển thị ảnh nền (kêu KHÁNH đọc hiểu)
+
+chỗ M8 apply_video_overlay có đoạn 
+config = getattr(self, "current_operation_config", lambda: None)()
+        if config is not None and getattr(self, "preview_button", None) and self.preview_button.isChecked():
+            try:
+                return self.run_command(config, frame, self.current_params())
+            except (cv2.error, ValueError, TypeError, ZeroDivisionError) as error:
+                self.status_message.setText(f"Không áp dụng được lên video: {error}")
+        return frame.copy()
+Main_interface sua 
+def schedule_preview(self, *_):
+    if self.current_image is None:
+                return
+            if not self.is_video_open or not self.video_timer.isActive():
+                self.preview_timer.start()
+def update_preview(self):
+        # Đoạn thêm
+        if self.is_video_open:
+            self.refresh_video_frame()
+            return
+        .....

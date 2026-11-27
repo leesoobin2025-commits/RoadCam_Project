@@ -2,7 +2,7 @@ from Libary import *
 
 #loc trung binh
 def mean_filter(img, ksize):
-    return cv2.blur(img, (ksize, ksize), cv2.BORDER_DEFAULT)
+    return cv2.blur(img, (ksize, ksize), borderType=cv2.BORDER_DEFAULT)
 
 #loc Gauss
 def gaussian_filter(img, ksize, sigma):
@@ -12,7 +12,7 @@ def gaussian_filter(img, ksize, sigma):
 
 #loc trung bing
 def median_filter(img, ksize):
-    return cv2.medianBlur(img, ksize, cv2.BORDER_DEFAULT)
+    return cv2.medianBlur(img, ksize)
 
 #loc laplacina
 def laplacian_filter(img, c):

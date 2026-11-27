@@ -6,11 +6,6 @@
 """
 from Libary import *
 
-MORPH_SHAPES = [("Hình chữ nhật", cv2.MORPH_RECT),
-                ("Hình elip", cv2.MORPH_ELLIPSE),
-                ("Hình chữ thập", cv2.MORPH_CROSS)]
-
-
 #Nhị phân hóa
 def binarize(img, threshold_val=127, use_otsu=False):
     if img is None:
@@ -37,13 +32,13 @@ def erode(img, ksize, shape, iterations):
     return cv2.erode(img,make_kernel(shape,ksize), iterations=int(np.clip(iterations,1,5)))
 
 def dilate(img, ksize, shape, iterations):
-    return cv2.dilate(img, make_kernel(shape,ksize), int(np.clip(iterations,1,5)))
+    return cv2.dilate(img, make_kernel(shape,ksize), iterations=int(np.clip(iterations,1,5)))
 
 def opening(img, ksize, shape, iterations):
-    return cv2.morphologyEx(img, cv2.MORPH_OPEN,make_kernel(shape,ksize), int(np.clip(iterations,1,5)))
+    return cv2.morphologyEx(img, cv2.MORPH_OPEN,make_kernel(shape,ksize), iterations=int(np.clip(iterations,1,5)))
 
 def closing(img,ksize,shape,iterations):
-    return cv2.morphologyEx(img, cv2.MORPH_CLOSE,make_kernel(shape,ksize), int(np.clip(iterations,1,5)))
+    return cv2.morphologyEx(img, cv2.MORPH_CLOSE,make_kernel(shape,ksize), iterations=int(np.clip(iterations,1,5)))
     
 def remove_small_regions(img, min_area):
      binary,_=binarize(img)

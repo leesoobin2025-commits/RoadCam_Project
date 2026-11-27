@@ -11,7 +11,7 @@ import traceback
 from PyQt6.QtCore import Qt, QTimer, QPoint, QPointF, QRectF, QEvent, QSize, QSettings
 from PyQt6.QtGui import (
     QImage, QPixmap, QAction, QKeySequence, QPainter, QPen, QColor,
-    QBrush, QPolygonF
+    QBrush, QPolygonF, QIcon
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
@@ -28,10 +28,12 @@ from matplotlib.figure import Figure
 from M2_adjustment import *
 from M3_filters import *
 from M4_noise import *
-from M5_color import hsv_channels, range_mask, lane_mask
-from M6_morphology import binarize, erode, dilate, opening, closing, remove_small_regions
-from M7_edges import sobel, canny, detect_lane, hough_all
+from M5_color import *
+from M6_morphology import *
+from M7_edges import *
 from M8_video import *
+from model_YOLO import detect_vehicles_and_people
+
 OPERATION_ERRORS = (
     cv2.error,
     TypeError,
@@ -50,7 +52,7 @@ PALETTES = {
                   TEXT="#182639", MUTED="#66768a", ACCENT="#2563eb",
                   SELECTED="#e3ecff", CANVAS="#e4e9f0"),
 }
-P = dict(PALETTES["dark"])   # bảng màu đang dùng; apply_theme() cập nhật tại chỗ
+P = dict(PALETTES["dark"])
 
 
 def canvas_style():
@@ -223,7 +225,7 @@ def cmd_levels(image, value):
 
 
 def cmd_invert(image):
-    return 255 - image
+    return negative_img(image)
 
 
 def _fixed_seed(func, seed=12345):
@@ -237,11 +239,11 @@ def _fixed_seed(func, seed=12345):
 
 
 def cmd_gaussian_noise(image, sigma):
-    return _fixed_seed(lambda: app_gaussian_noise(image, mean=0, sigma=float(sigma)))
+    return _fixed_seed(lambda: add_gaussian_noise(image, mean=0, sigma=float(sigma)))
 
 
 def cmd_salt_pepper_noise(image, p):
-    return _fixed_seed(lambda: app_salt_pepper_noise(image, p=float(p)))
+    return _fixed_seed(lambda: add_salt_pepper_noise(image, p=float(p)))
 
 
 def cmd_denoise(image, method, ksize, q):
@@ -266,7 +268,6 @@ def _need_color(image):
 def _mask_or_image(image, mask, view):
     """view='mask' -> mặt nạ trắng/đen; còn lại -> ảnh chỉ giữ vùng được chọn."""
     return mask if view == "mask" else cv2.bitwise_and(image, image, mask=mask)
-
 
 # ---- M5: Màu ----
 def cmd_hsv_range(image, hmin, hmax, smin, smax, vmin, vmax, view):
@@ -302,12 +303,15 @@ def cmd_canny(image, canny_low, canny_high):
     return canny(to_gray(image), canny_low, canny_high)
 
 
-def cmd_hough(image, canny_low, canny_high, threshold, min_len, max_gap, mode):
-    kw = dict(canny_low=canny_low, canny_high=canny_high,
-              threshold=threshold, min_len=min_len, max_gap=max_gap)
-    if mode == "classify":
-        return detect_lane(image, roi=None, **kw)       # phân loại trái (xanh lá) / phải (đỏ)
-    return hough_all(image, roi=None, **kw)             # vẽ mọi đoạn
+def cmd_hough(image, canny_low, canny_high, threshold, min_len, max_gap):
+    edge_img = canny(to_gray(image), canny_low, canny_high)
+    lines = hough_lines(edge_img, threshold, min_len, max_gap)
+
+    out = to_bgr(image).copy()
+    for x1, y1, x2, y2 in lines:
+        cv2.line(out, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+
+    return out, {"Số đoạn thẳng": len(lines)}           # vẽ mọi đoạn
 
 
 def cmd_detect_lane(image, canny_low, canny_high, threshold, min_len, max_gap, roi_points=None):
@@ -316,13 +320,6 @@ def cmd_detect_lane(image, canny_low, canny_high, threshold, min_len, max_gap, r
                          "và click 4 đỉnh (hoặc Nạp ROI).")
     return detect_lane(image, roi=roi_points, canny_low=canny_low, canny_high=canny_high,
                        threshold=threshold, min_len=min_len, max_gap=max_gap)
-
-
-def mse_psnr(a, b):
-    """MSE và PSNR (dB) giữa 2 ảnh uint8 cùng kích thước — nguồn duy nhất cho mọi nơi cần PSNR."""
-    mse = float(np.mean((a.astype(np.float64) - b.astype(np.float64)) ** 2))
-    return mse, (float("inf") if mse == 0 else 10 * np.log10(255 ** 2 / mse))
-
 
 def similarity_metrics(a, b):
     """Độ giống nhau giữa 2 ảnh uint8 cùng kích thước."""
@@ -356,12 +353,13 @@ def command(name, func, *params, lib=False, **extra):
 equalize_cv2 = _img(hist_balance_openCV)   # dùng cho nút "So sánh với OpenCV"
 
 KSIZE_ITEMS = [(f"{k} × {k}", k) for k in (3, 5, 7, 9)]
+
 MORPH_SHAPES = [("Hình chữ nhật", cv2.MORPH_RECT),
                 ("Hình elip", cv2.MORPH_ELLIPSE),
                 ("Hình chữ thập", cv2.MORPH_CROSS)]
+
 ITERATION_ITEMS = [(str(i), i) for i in (1, 2, 3, 4, 5)]
-DENOISE_METHODS = [("Trung bình hình học", "geometric"),
-                   ("Phản điều hòa ", "contraharmonic")]
+DENOISE_METHODS = [("Phản điều hòa ", "contraharmonic")]#("Trung bình hình học", "geometric"), thêm sau
 
 
 def ksize_param(default=5, label="Kích thước nhân"):
@@ -443,10 +441,7 @@ HOUGH_PARAMS = [("threshold", "Hough: threshold (số phiếu)", 1, 200, 15, 1, 
 EDGES = {
     "sobel": command("Sobel", cmd_sobel),
     "canny": command("Canny", cmd_canny, *CANNY_PARAMS),
-    "hough": command("Tìm đường thẳng (Hough)", cmd_hough, *CANNY_PARAMS, *HOUGH_PARAMS,
-                     ("mode", "Cách vẽ", "combo",
-                      [("Phân loại trái (xanh lá) / phải (đỏ)", "classify"),
-                       ("Vẽ mọi đoạn", "all")], "classify")),
+    "hough": command("Tìm đường thẳng (Hough)", cmd_hough, *CANNY_PARAMS, *HOUGH_PARAMS),
     "lane": command("Phát hiện làn (tự động)", cmd_detect_lane, *CANNY_PARAMS, *HOUGH_PARAMS,
                     needs_roi="points"),
 }
@@ -726,21 +721,26 @@ class ImageCanvas(QLabel):
                 painter.drawEllipse(p, 4, 4)
             if len(pts) == 2:
                 painter.drawLine(pts[0], pts[1])
+                
         if (self.interaction_mode == "roi_poly" and self.roi_poly_points
                 and self.roi_poly_size == (self.image.shape[1], self.image.shape[0])):
             pts = [QPointF(x * z, y * z) for x, y in self.roi_poly_points]
+            is_editing = (self.interaction_mode == "roi_poly")
             painter.setPen(QPen(QColor("#4da3ff"), 2))
+            
             if len(pts) == 4:
-                painter.setBrush(QBrush(QColor(47, 124, 246, 50)))
+                alpha = 50 if is_editing else 15
+                painter.setBrush(QBrush(QColor(47, 124, 246, alpha)))
                 painter.drawPolygon(QPolygonF(pts))
             else:
                 for i in range(len(pts) - 1):
                     painter.drawLine(pts[i], pts[i + 1])
-            painter.setBrush(QBrush(QColor("#4da3ff")))
-            for i, p in enumerate(pts):
-                painter.drawEllipse(p, 4, 4)
-                painter.drawText(p + QPointF(7, -7), str(i + 1))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if is_editing:
+                painter.setBrush(QBrush(QColor("#4da3ff")))
+                for i, p in enumerate(pts):
+                    painter.drawEllipse(p, 4, 4)
+                    painter.drawText(p + QPointF(7, -7), str(i + 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.end()
 
 
@@ -951,8 +951,116 @@ class ParamCombo(QWidget):
         self.combo.setCurrentIndex(index if index >= 0 else 0)
         self.combo.blockSignals(False)
  
+#==========================================================
+def make_tool_icon(name, color_hex=None):
+    """Vẽ icon vector 20x20 sắc nét bằng QPainter, tự động đổi màu theo theme."""
+    pm = QPixmap(20, 20)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color_hex or P["TEXT"]), 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
 
-# ====================================================
+    if name == "cursor":        # Con trỏ chuột
+        p.drawPolygon(QPolygonF([QPointF(5, 3), QPointF(5, 15), QPointF(8.5, 11.5),
+                                 QPointF(11.5, 17), QPointF(13.5, 16), QPointF(10.5, 10.5), QPointF(15, 10.5)]))
+    elif name == "roi_poly":    # Hình thang 4 đỉnh (RoadCam ROI)
+        pts = [QPointF(6, 4), QPointF(14, 4), QPointF(18, 16), QPointF(2, 16)]
+        p.drawPolygon(QPolygonF(pts))
+        p.setBrush(QBrush(QColor(P["ACCENT"])))
+        for pt in pts:
+            p.drawEllipse(pt, 2.0, 2.0)
+    elif name == "ruler":       # Thước đo 2 điểm
+        p.drawLine(QPointF(3, 17), QPointF(17, 3))
+        p.drawLine(QPointF(6, 11), QPointF(8, 13))
+        p.drawLine(QPointF(9, 8), QPointF(11, 10))
+        p.drawLine(QPointF(12, 5), QPointF(14, 7))
+    elif name == "pan":         # Bàn tay / Kéo 4 chiều
+        p.drawLine(QPointF(10, 2), QPointF(10, 18))
+        p.drawLine(QPointF(2, 10), QPointF(18, 10))
+        p.drawPolyline(QPolygonF([QPointF(7, 5), QPointF(10, 2), QPointF(13, 5)]))
+        p.drawPolyline(QPolygonF([QPointF(7, 15), QPointF(10, 18), QPointF(13, 15)]))
+        p.drawPolyline(QPolygonF([QPointF(5, 7), QPointF(2, 10), QPointF(5, 13)]))
+        p.drawPolyline(QPolygonF([QPointF(15, 7), QPointF(18, 10), QPointF(15, 13)]))
+    elif name == "zoom_in":     # Kính lúp dấu +
+        p.drawEllipse(QPointF(9, 9), 5.5, 5.5)
+        p.drawLine(QPointF(13.5, 13.5), QPointF(17.5, 17.5))
+        p.drawLine(QPointF(9, 6.5), QPointF(9, 11.5))
+        p.drawLine(QPointF(6.5, 9), QPointF(11.5, 9))
+    elif name == "zoom_out":    # Kính lúp dấu -
+        p.drawEllipse(QPointF(9, 9), 5.5, 5.5)
+        p.drawLine(QPointF(13.5, 13.5), QPointF(17.5, 17.5))
+        p.drawLine(QPointF(6.5, 9), QPointF(11.5, 9))
+    elif name == "fit":         # Khung 4 góc (Vừa khung)
+        p.drawPolyline(QPolygonF([QPointF(3, 7), QPointF(3, 3), QPointF(7, 3)]))
+        p.drawPolyline(QPolygonF([QPointF(13, 3), QPointF(17, 3), QPointF(17, 7)]))
+        p.drawPolyline(QPolygonF([QPointF(17, 13), QPointF(17, 17), QPointF(13, 17)]))
+        p.drawPolyline(QPolygonF([QPointF(7, 17), QPointF(3, 17), QPointF(3, 13)]))
+    elif name == "zoom_100":    # Số 1:1
+        p.setFont(p.font())
+        p.drawText(QRectF(0, 0, 20, 20), Qt.AlignmentFlag.AlignCenter, "1:1")
+    elif name == "apply_roi":   # Hình thang + dấu tích xanh
+        p.drawPolyline(QPolygonF([QPointF(5, 4), QPointF(13, 4), QPointF(16, 13), QPointF(2, 13), QPointF(5, 4)]))
+        pen.setColor(QColor("#2ee66b"))
+        p.setPen(pen)
+        p.drawPolyline(QPolygonF([QPointF(11, 15), QPointF(13.5, 17.5), QPointF(18, 12.5)]))
+    elif name == "save_roi":    # Đĩa mềm lưu ROI
+        p.drawRect(QRectF(3, 3, 14, 14))
+        p.drawRect(QRectF(6, 3, 8, 5))
+        p.drawRect(QRectF(6, 11, 8, 6))
+    elif name == "load_roi":    # Thư mục mở nạp ROI
+        p.drawPolygon(QPolygonF([QPointF(2, 5), QPointF(8, 5), QPointF(10, 7),
+                                 QPointF(18, 7), QPointF(18, 16), QPointF(2, 16)]))
+    elif name == "clear_roi":   # Thùng rác / Xóa ROI
+        pen.setColor(QColor("#ff4d6d"))
+        p.setPen(pen)
+        p.drawLine(QPointF(4, 6), QPointF(16, 6))
+        p.drawRect(QRectF(7, 3.5, 6, 2.5))
+        p.drawPolygon(QPolygonF([QPointF(5.5, 6), QPointF(14.5, 6), QPointF(13.5, 17), QPointF(6.5, 17)]))
+    elif name == "rotate":      # Mũi tên xoay 90°
+        p.drawArc(QRectF(4, 4, 12, 12), 30 * 16, 270 * 16)
+        p.drawPolyline(QPolygonF([QPointF(13, 3), QPointF(16.5, 5.5), QPointF(13.5, 8)]))
+    elif name == "gray":        # Vòng tròn nửa trắng nửa đen (Ảnh xám)
+        p.drawEllipse(QPointF(10, 10), 6.5, 6.5)
+        p.setBrush(QBrush(QColor(color_hex or P["TEXT"])))
+        p.drawPie(QRectF(3.5, 3.5, 13, 13), 90 * 16, 180 * 16)
+    elif name == "channels":    # 3 vòng tròn RGB giao nhau (Tách kênh)
+        p.setPen(QPen(QColor("#ff4d6d"), 1.5)); p.drawEllipse(QPointF(10, 7), 4, 4)
+        p.setPen(QPen(QColor("#2ee66b"), 1.5)); p.drawEllipse(QPointF(7.5, 12), 4, 4)
+        p.setPen(QPen(QColor("#4485ff"), 1.5)); p.drawEllipse(QPointF(12.5, 12), 4, 4)
+    elif name == "info":        # Chữ i trong vòng tròn
+        p.drawEllipse(QPointF(10, 10), 6.5, 6.5)
+        p.drawLine(QPointF(10, 9.5), QPointF(10, 13.5))
+        p.drawPoint(QPointF(10, 6.8))
+    elif name == "reset":       # Mũi tên hoàn tác về gốc
+        p.drawPolyline(QPolygonF([QPointF(7, 4), QPointF(3, 8), QPointF(7, 12)]))
+        p.drawArc(QRectF(4, 8, 12, 8), 0, 180 * 16)
+    elif name == "roi_rect":    # Khung chữ nhật nét đứt (Chọn vùng ROI)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.drawRect(QRectF(3, 4, 14, 12))
+    elif name == "crop_save":   # Cái kéo cắt ROI ra file riêng
+        p.drawEllipse(QPointF(6, 15), 2.5, 2.5)
+        p.drawEllipse(QPointF(14, 15), 2.5, 2.5)
+        p.drawLine(QPointF(7.8, 13.2), QPointF(15, 4))
+        p.drawLine(QPointF(12.2, 13.2), QPointF(5, 4))
+    elif name == "crop_into":   # Khung cắt lồng góc (Cắt trực tiếp vào ảnh)
+        p.drawPolyline(QPolygonF([QPointF(6, 2), QPointF(6, 14), QPointF(18, 14)]))
+        p.drawPolyline(QPolygonF([QPointF(2, 6), QPointF(14, 6), QPointF(14, 18)]))
+    elif name == "save_crop":   # Đĩa mềm nhỏ góc có khung (Lưu ROI chữ nhật thành...)
+        p.drawRect(QRectF(3, 3, 14, 14))
+        p.drawRect(QRectF(6, 3, 8, 5))
+        pen.setStyle(Qt.PenStyle.DotLine)
+        p.setPen(pen)
+        p.drawRect(QRectF(6, 10, 8, 5))
+
+    p.end()
+    return QIcon(pm)
+
+
+# =========================================================
 # ỨNG DỤNG CHÍNH
 # =========================================================
 
@@ -1041,7 +1149,9 @@ class ImageStudio(VideoModuleM8, QMainWindow):
             QPushButton#primary, QFrame#card QPushButton#primary {{ background: {ACCENT}; color: white; border-color: {ACCENT}; font-weight: 600; }}
             QPushButton:disabled, QToolButton:disabled {{ color: {MUTED}; }}
             QComboBox, QSpinBox, QDoubleSpinBox {{ background: {PANEL_2}; border: 1px solid {BORDER}; border-radius: 6px; padding: 5px 7px; min-height: 20px; }}
-            QComboBox QAbstractItemView {{ selection-background-color: {selected}; selection-color: {TEXT}; }}
+            QFrame#card QComboBox, QFrame#card QSpinBox, QFrame#card QDoubleSpinBox {{ background: {PANEL_2}; color: {TEXT}; }}
+            QFrame#card QComboBox QAbstractItemView, QComboBox QAbstractItemView {{ background: {PANEL}; color: {TEXT}; border: 1px solid {BORDER}; selection-background-color: {selected}; selection-color: {TEXT}; }}
+            QComboBox QAbstractItemView::item:hover, QComboBox QAbstractItemView::item:selected {{ background: {selected}; color: {TEXT}; }}
             QTabWidget::pane {{ border: none; padding-top: 7px; }}
             QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 7px 7px; border-bottom: 2px solid transparent; }}
             QTabBar::tab:selected {{ color: {ACCENT}; border-bottom-color: {ACCENT}; font-weight: 600; }}
@@ -1062,11 +1172,16 @@ class ImageStudio(VideoModuleM8, QMainWindow):
             QStatusBar QLabel {{ color: {MUTED}; padding: 2px 8px; }}
             
         """)
+        
         if hasattr(self, "histogram"):
             self.histogram.figure.set_facecolor(PANEL)
             self.histogram.update_histogram(self.display_source())
             self.canvas.setStyleSheet(canvas_style())
             self.compare_widget.update()
+            
+        if hasattr(self, "_tool_icon_buttons"):
+            for btn, icon_name in self._tool_icon_buttons:
+                btn.setIcon(make_tool_icon(icon_name))
 
     def change_theme(self, index):
         self.theme_name = "light" if index == 1 else "dark"
@@ -1132,8 +1247,17 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         self.create_video_menu(bar)
 
         m = bar.addMenu("AI")
-        a = self.add_action(m, "(Sẽ bổ sung)", lambda: None)
-        a.setEnabled(False)
+        self.yolo_action = self.add_action(m, "Phát hiện phương tiện (YOLO)", self.run_yolo_detection)
+        self.yolo_action.setCheckable(True)
+        
+        self.yolo_distance_action = self.add_action(
+            m, "Đo khoảng cách xe (theo ROI hình thang)", self.toggle_yolo_distance
+        )
+        self.yolo_distance_action.setCheckable(True)
+        self.yolo_distance_action.setChecked(False)
+        
+        m.addSeparator()
+        self.add_action(m, "Xuất video phát hiện phương tiện (YOLO)...", self.export_yolo_video)
 
         m = bar.addMenu("Trợ giúp")
         self.add_action(m, "Phím tắt", lambda: QMessageBox.information(
@@ -1223,7 +1347,7 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         tools.setObjectName("tools")
         tools.setMovable(False)
         tools.setOrientation(Qt.Orientation.Vertical)
-        tools.setFixedWidth(154)
+        tools.setFixedWidth(56)
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, tools)
 
         tool_content = QWidget()
@@ -1235,74 +1359,79 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         tool_scroll.setWidgetResizable(True)
         tool_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         tool_scroll.setWidget(tool_content)
-        tool_scroll.setFixedWidth(144)
+        tool_scroll.setFixedWidth(46)
         tools.addWidget(tool_scroll)
 
-        def section(text):
-            lbl = QLabel(text)
-            lbl.setObjectName("toolSection")
-            tool_layout.addWidget(lbl)
+        def section():
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setStyleSheet(f"color: {P['BORDER']}; margin: 4px 6px;")
+            tool_layout.addWidget(line)
 
-        SP = QStyle.StandardPixmap
+        self._tool_icon_buttons = []   # lưu (button, icon_name) để đổi màu khi chuyển Dark/Light
 
-        def tool_button(icon, text, tip=None, slot=None, checkable=False):
-            b = QPushButton(text)
+        def tool_button(icon_name, text, tip=None, slot=None, checkable=False):
+            b = QPushButton()
             b.setObjectName("tool")
             b.setFixedHeight(34)
-            b.setIcon(self.style().standardIcon(icon))
+            b.setIconSize(QSize(20, 20))
+            b.setIcon(make_tool_icon(icon_name))
             b.setToolTip(tip or text)
             b.setCheckable(checkable)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             if slot:
                 b.clicked.connect(slot)
             tool_layout.addWidget(b)
+            self._tool_icon_buttons.append((b, icon_name))
             return b
 
-        title = QLabel("HỘP CÔNG CỤ")
-        title.setObjectName("toolTitle")
-        tool_layout.addWidget(title)
-
-        section("CHỌN & ĐO")
+        section()
         group = QButtonGroup(self)
         group.setExclusive(True)
         self.tool_actions = {}
-        for icon, text, tip, mode in [
-            (SP.SP_ArrowUp, "Con trỏ", "Con trỏ: xem giá trị pixel", "none"),
-            (SP.SP_FileDialogDetailedView, "Chọn vùng", "Chọn vùng ROI (kéo chuột)", "roi"),
-            (SP.SP_FileDialogDetailedView, "ROI hình thang", "Click 4 đỉnh vùng mặt đường", "roi_poly"),
-            (SP.SP_FileDialogInfoView, "Thước đo", "Click điểm A rồi điểm B", "ruler"),
-            (SP.SP_ArrowRight, "Kéo ảnh", "Kéo ảnh (Pan)", "pan"),
+        for icon_name, text, tip, mode in [
+            ("cursor",   "Con trỏ",        "Con trỏ: xem giá trị pixel", "none"),
+            ("roi_rect", "Chọn vùng",      "Chọn vùng ROI hình chữ nhật (kéo chuột)", "roi"),
+            ("roi_poly", "ROI hình thang", "Click 4 đỉnh vùng mặt đường", "roi_poly"),
+            ("ruler",    "Thước đo",       "Click điểm A rồi điểm B", "ruler"),
+            ("pan",      "Kéo ảnh",        "Kéo ảnh (Pan)", "pan"),
         ]:
-            b = tool_button(icon, text, tip, checkable=True,
+            b = tool_button(icon_name, text, tip, checkable=True,
                             slot=lambda _=False, md=mode: self.set_tool(md))
             group.addButton(b)
             self.tool_actions[mode] = b
         self.tool_actions["none"].setChecked(True)
 
-        section("XEM")
-        tool_button(SP.SP_ArrowUp, "Phóng to", slot=lambda: self.zoom_by(1.25))
-        tool_button(SP.SP_ArrowDown, "Thu nhỏ", slot=lambda: self.zoom_by(1 / 1.25))
-        tool_button(SP.SP_TitleBarMaxButton, "Vừa khung", slot=lambda: self.canvas.fit_to_view())
-        tool_button(SP.SP_DesktopIcon, "100%", slot=lambda: self.canvas.set_zoom(1.0))
+        section()
+        tool_button("zoom_in",  "Phóng to",  slot=lambda: self.zoom_by(1.25))
+        tool_button("zoom_out", "Thu nhỏ",   slot=lambda: self.zoom_by(1 / 1.25))
+        tool_button("fit",      "Vừa khung", slot=lambda: self.canvas.fit_to_view())
+        tool_button("zoom_100", "100%",      slot=lambda: self.canvas.set_zoom(1.0))
 
-        section("VÙNG CHỌN")
-        tool_button(SP.SP_DialogApplyButton, "Cắt ROI (tự lưu)",
-                    "Cắt vùng chọn ra ảnh riêng, tự lưu vào thư mục ROI", self.crop_roi)
-        tool_button(SP.SP_ArrowDown, "Cắt vào ảnh", "Cắt ảnh hiện tại theo ROI (Undo được)",
-                    self.crop_into_image)
-        tool_button(SP.SP_DialogSaveButton, "Lưu ROI thành...", "Chọn nơi lưu ROI", self.save_roi)
-        tool_button(SP.SP_DialogApplyButton, "Áp dụng ROI",
+        section()
+        # --- Nhóm ROI hình chữ nhật ---
+        tool_button("crop_save", "Cắt ROI (tự lưu)",
+                    "Cắt vùng chọn chữ nhật ra ảnh riêng, tự lưu vào thư mục ROI", self.crop_roi)
+        tool_button("crop_into", "Cắt vào ảnh",
+                    "Cắt ảnh hiện tại theo ROI chữ nhật (Undo được)", self.crop_into_image)
+        tool_button("save_crop", "Lưu ROI thành...",
+                    "Chọn nơi lưu vùng cắt ROI chữ nhật", self.save_roi)
+        # --- Nhóm ROI hình thang ---
+        tool_button("apply_roi", "Áp dụng ROI",
                     "Giữ lại vùng trong ROI hình thang (Undo được)", self.apply_roi_polygon)
-        tool_button(SP.SP_DialogSaveButton, "Lưu ROI", "Lưu 4 tọa độ ROI ra tệp .json",
-                    self.save_roi_polygon)
-        tool_button(SP.SP_ArrowDown, "Nạp ROI", "Nạp ROI từ tệp .json", self.load_roi_polygon)
+        tool_button("save_roi",  "Lưu ROI",
+                    "Lưu 4 tọa độ ROI hình thang ra tệp .json", self.save_roi_polygon)
+        tool_button("load_roi",  "Nạp ROI",
+                    "Nạp ROI hình thang từ tệp .json", self.load_roi_polygon)
+        tool_button("clear_roi", "Xóa ROI",
+                    "Xóa khung ROI đang chọn", self.clear_roi_polygon)
 
-        section("ẢNH")
-        tool_button(SP.SP_BrowserReload, "Xoay 90°", slot=lambda: self.apply_op(*TRANSFORMS[0]))
-        tool_button(SP.SP_FileDialogContentsView, "Ảnh xám", slot=self.convert_gray)
-        tool_button(SP.SP_DirIcon, "Tách kênh B/G/R", slot=self.split_channels)
-        tool_button(SP.SP_MessageBoxInformation, "Thông tin ảnh", slot=self.show_image_info)
-        tool_button(SP.SP_DialogResetButton, "Khôi phục gốc", slot=self.restore_original)
+        section()
+        tool_button("rotate",   "Xoay 90°",       slot=lambda: self.apply_op(*TRANSFORMS[0]))
+        tool_button("gray",     "Ảnh xám",        slot=self.convert_gray)
+        tool_button("channels", "Tách kênh B/G/R", slot=self.split_channels)
+        tool_button("info",     "Thông tin ảnh",  slot=self.show_image_info)
+        tool_button("reset",    "Khôi phục gốc",  slot=self.restore_original)
 
         tool_layout.addStretch()
 
@@ -1646,9 +1775,15 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         self.param_tabs.setCurrentIndex(index)
 
     def open_command(self, group, key):
-        if self.canvas.interaction_mode == "roi_poly":      # <-- thêm
-            self.tool_actions["none"].setChecked(True)
-            self.set_tool("none")
+        if (group, key) in (("Điều chỉnh", "balance histogram"), ("Điều chỉnh", "clahe")):
+            if self.current_image is not None and self.current_image.ndim != 2:
+                QMessageBox.information(
+                    self,
+                    GROUPS[group][key]["name"],
+                    "Chức năng này chỉ dùng cho ảnh xám.\nHãy chuyển ảnh sang ảnh xám trước."
+                )
+                return
+            
         self.clear_preview(reset_sliders=True)
         self.active_group = group
         self.active_command = key
@@ -1663,6 +1798,8 @@ class ImageStudio(VideoModuleM8, QMainWindow):
             self.operation_stacks[self.active_group].setCurrentIndex(0)
         self.active_command = None
         self.active_group = None
+        if self.is_video_open:
+            self.refresh_video_frame()
 
     def set_comparison_visible(self, visible):
         self.compare_card.setVisible(visible)
@@ -1874,7 +2011,7 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         if self.current_image is None:
             QMessageBox.information(self, "Thông báo", "Hãy mở ảnh trước.")
             return False
-        if self.is_video_open:
+        if self.video_timer.isActive():
             QMessageBox.information(self, "Thông báo", "Hãy dừng video (Video → Dừng) trước khi chỉnh sửa.")
             return False
         return self.ensure_no_preview()
@@ -1918,12 +2055,6 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         except Exception as error:
             QMessageBox.critical(self, "Lỗi lưu ảnh", str(error))
             return False
-
-    # -----------------------------------------------------
-    # VIDEO
-    # -----------------------------------------------------
-
-    
     # -----------------------------------------------------
     # ZOOM
     # -----------------------------------------------------
@@ -2151,6 +2282,11 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         self.canvas.roi_poly_points = list(points) if points else []
         self.canvas.roi_poly_size = size
         self.canvas.update()
+        if getattr(self, "is_video_open", False) and hasattr(self, "refresh_video_frame"):
+            self.refresh_video_frame()
+        elif (points is not None and getattr(self, "yolo_distance_action", None)
+              and self.yolo_distance_action.isChecked()):
+            QTimer.singleShot(0, self.run_yolo_detection)
 
     def clear_roi_polygon(self):
         self.set_roi(None, None)
@@ -2256,6 +2392,13 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         self.command_info = {}
         if isinstance(out, tuple):
             out, self.command_info = out
+        if not need:
+            mask = self.get_roi_mask(image)
+            if mask is not None and out.shape[:2] == image.shape[:2]:
+                if out.ndim == 2 and image.ndim == 3:
+                    out = cv2.cvtColor(out, cv2.COLOR_GRAY2BGR)
+                cond = mask > 0 if out.ndim == 2 else mask[..., None] > 0
+                out = np.where(cond, out, image)
         return out
 
     def show_hsv_channels(self):
@@ -2295,10 +2438,15 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         return {key: widget.value() for key, widget in widgets.items()}
 
     def schedule_preview(self, *_):
-        if self.current_image is not None and not self.is_video_open:
+        if self.current_image is None:
+            return
+        if not self.is_video_open or not self.video_timer.isActive():
             self.preview_timer.start()
 
     def update_preview(self):
+        if self.is_video_open:
+            self.refresh_video_frame()
+            return
         key = self.active_command
         config = self.current_operation_config()
         if (key is None or config is None or self.current_image is None
@@ -2337,8 +2485,22 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         self.preview_timer.stop()
         key = self.active_command
         config = self.current_operation_config()
-        if key is None or config is None or self.current_image is None or self.is_video_open:
+        if key is None or config is None or self.current_image is None:
             return
+        
+        if self.is_video_open:
+            params = self.current_params()
+            desc = self.describe_command(params)
+            self.video_committed_op = (config, params)
+            # Đóng trang thông số về danh sách để tránh áp chồng 2 lần lúc preview
+            if self.active_group in self.operation_stacks:
+                self.operation_stacks[self.active_group].setCurrentIndex(0)
+            self.active_command = None
+            self.active_group = None
+            self.refresh_video_frame()
+            self.status_message.setText("Đã áp dụng lên toàn video: " + desc)
+            return
+        
         params = self.current_params()
         try:
             result = self.run_command(config, self.current_image, params)
@@ -2555,6 +2717,65 @@ class ImageStudio(VideoModuleM8, QMainWindow):
         if self.video_capture is not None:
             self.video_capture.release()
         event.accept()
+        
+    #MODEL YOLO
+    def get_yolo_roi(self, frame):
+        """Chỉ lấy tọa độ ROI khi người dùng đã tích chọn chế độ đo khoảng cách."""
+        if not getattr(self, "yolo_distance_action", None) or not self.yolo_distance_action.isChecked():
+            return None
+        return self.current_roi_points(frame, warn=False)
+
+    def toggle_yolo_distance(self, checked):
+        if self.current_image is None:
+            self.yolo_distance_action.setChecked(False)
+            QMessageBox.information(self, "Thông báo", "Hãy mở ảnh hoặc video trước.")
+            return
+
+        has_valid_roi = self.current_roi_points(self.current_image, warn=False) is not None
+
+        if checked and self.current_roi_points(self.current_image, warn=False) is None:
+            # Tự bật sẵn công cụ vẽ ROI 4 điểm để người dùng click ngay trên ảnh/video
+            self.tool_actions["roi_poly"].setChecked(True)
+            self.set_tool("roi_poly")
+            self.status_message.setText(
+                "Đã bật đo khoảng cách — hãy click 4 đỉnh vùng mặt đường (ROI hình thang)"
+            )
+
+        if self.is_video_open:
+            if checked and self.video_overlay != "yolo":
+                self.set_video_overlay("yolo")
+            elif self.video_overlay == "yolo":
+                self.refresh_video_frame()
+        elif checked and has_valid_roi:
+            self.run_yolo_detection()
+
+    def run_yolo_detection(self, checked=False):
+        if self.current_image is None:
+            self.yolo_action.setChecked(False)
+            QMessageBox.information(self, "Thông báo", "Hãy mở ảnh hoặc video trước.")
+            return
+
+        if self.is_video_open:
+            self.set_video_overlay("yolo" if checked else "none")
+            return
+
+        self.yolo_action.setChecked(False)
+        if not self.can_edit():
+            return
+        try:
+            self.status_message.setText("Đang chạy mô hình YOLOv8n...")
+            QApplication.processEvents()
+            roi = self.get_yolo_roi(self.current_image)
+            result, info = detect_vehicles_and_people(self.current_image, roi_points=roi)
+        except Exception as error:
+            QMessageBox.warning(self, "YOLO", f"Lỗi chạy mô hình: {error}")
+            return
+
+        self.push_state("AI: Phát hiện phương tiện (YOLO)", result)
+        self.command_info = info
+        self.update_results()
+        nearest = f" | Gần nhất: {info['Xe gần nhất']}" if "Xe gần nhất" in info else ""
+        self.status_message.setText(f"YOLO: {info['Số xe']} xe, {info['Số người']} người{nearest}")
         
 def excepthook(exc_type, exc, tb):
     traceback.print_exception(exc_type, exc, tb)

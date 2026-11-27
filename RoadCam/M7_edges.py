@@ -8,7 +8,6 @@
 from Libary import *
 from M3_filters import gaussian_filter
 from M5_color import lane_mask
-
 G = (0, 255, 0)     # vạch trái (BGR)
 R = (0, 0, 255)       # vạch phải (BGR)
 BLUE = (255, 128, 0)
@@ -23,11 +22,11 @@ def sobel(gray_img):
     return dolon.astype(np.uint8)
 
 def canny(gray_img, low,high):
-    low,high= int(low), int(high)
+    low, high= int(low), int(high)
     return cv2.Canny(gray_img,low,high)
 
 def hough_lines(edge_img, threshold, min_len,max_gap):
-    line=cv2.HoughLinesP(edge_img, 1, np.pi/180, int(threshold), min_len, max_gap)
+    line = cv2.HoughLinesP(edge_img, 1, np.pi/180, int(threshold), minLineLength=min_len, maxLineGap=max_gap)
     
     if line is None:
         return []
@@ -67,34 +66,34 @@ def draw_lane(img, left, right, thickness=3):
 #pipeline
 def apply_roi(edges, roi_points):
     if roi_points is None:
-        return edges                      # không có ROI thì dùng cả ảnh
+        return edges   
     if len(roi_points) < 3:
         raise ValueError("ROI phải có ít nhất 3 điểm")
     mask = np.zeros(edges.shape[:2], dtype=np.uint8)
     cv2.fillPoly(mask, [np.array(roi_points, dtype=np.int32)], 255)
-    return cv2.bitwise_and(edges, mask)
+    
+    return cv2.bitwise_and(edges, edges, mask=mask)
 
 def color_filtered_edges(img, canny_low, canny_high, roi=None,
                          blur_ksize=5, blur_sigma=1.5, grow=7):
     gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = canny(gaussian_filter(gray, blur_ksize, blur_sigma), canny_low, canny_high)
-
     if img.ndim == 3:                                   # ảnh màu mới có HSV
         paint = lane_mask(img)                          # trắng OR vàng, CHƯA nhân ROI
         paint = cv2.dilate(paint, np.ones((grow, grow), np.uint8))  # biên nằm sát mép vạch
         edges = cv2.bitwise_and(edges, paint)
-
     return apply_roi(edges, roi)
-
+    
 def edges_in_roi(img, canny_low, canny_high, roi=None, blur_ksize=5, blur_sigma=1.5):
     gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blur = gaussian_filter(gray, blur_ksize, blur_sigma)
-    return apply_roi(canny(blur, canny_low, canny_high), roi)
+    edges = canny(blur, canny_low, canny_high)
+    return apply_roi(edges, roi) if roi is not None else edges
 
 def hough_all(img, threshold, min_len, max_gap, canny_low, canny_high, roi=None):
     edges = edges_in_roi(img, canny_low, canny_high, roi=roi)
     lines = hough_lines(edges, threshold, min_len, max_gap)
-    return draw_lane(img, lines, [])          # vẽ mọi đoạn bằng màu xanh lá
+    return draw_lane(img, lines, [])
 
 def detect_lane(img, roi, canny_low, canny_high, threshold, min_len, max_gap):
     edges = color_filtered_edges(img, canny_low, canny_high, roi=roi)
